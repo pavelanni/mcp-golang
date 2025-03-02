@@ -60,19 +60,29 @@ package stdio
 import (
 	"encoding/json"
 	"errors"
-	"github.com/metoro-io/mcp-golang/transport"
+	"log"
 	"sync"
+
+	"github.com/metoro-io/mcp-golang/transport"
 )
 
 // ReadBuffer buffers a continuous stdio stream into discrete JSON-RPC messages.
 type ReadBuffer struct {
 	mu     sync.Mutex
 	buffer []byte
+	logger *log.Logger
 }
 
 // NewReadBuffer creates a new ReadBuffer.
 func NewReadBuffer() *ReadBuffer {
 	return &ReadBuffer{}
+}
+
+// SetLogger sets the logger for the ReadBuffer.
+func (rb *ReadBuffer) SetLogger(logger *log.Logger) {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	rb.logger = logger
 }
 
 // Append adds a chunk of data to the buffer.
@@ -104,7 +114,7 @@ func (rb *ReadBuffer) ReadMessage() (*transport.BaseJsonRpcMessage, error) {
 			line := string(rb.buffer[:i])
 			//println("read line: ", line)
 			rb.buffer = rb.buffer[i+1:]
-			return deserializeMessage(line)
+			return rb.deserializeMessage(line)
 		}
 	}
 
@@ -119,34 +129,39 @@ func (rb *ReadBuffer) Clear() {
 }
 
 // deserializeMessage deserializes a JSON-RPC message from a string.
-func deserializeMessage(line string) (*transport.BaseJsonRpcMessage, error) {
+func (rb *ReadBuffer) deserializeMessage(line string) (*transport.BaseJsonRpcMessage, error) {
+	// Log the raw message content
+	if rb.logger != nil {
+		rb.logger.Printf("DEBUG: Raw message content: %s", line)
+	}
+
 	var request transport.BaseJSONRPCRequest
 	if err := json.Unmarshal([]byte(line), &request); err == nil {
 		//println("unmarshaled request:", spew.Sdump(request))
 		return transport.NewBaseMessageRequest(&request), nil
-	} else {
-		//println("unmarshaled request error:", err.Error())
+	} else if rb.logger != nil {
+		rb.logger.Printf("DEBUG: Failed to unmarshal as request: %v", err)
 	}
 
 	var notification transport.BaseJSONRPCNotification
 	if err := json.Unmarshal([]byte(line), &notification); err == nil {
 		return transport.NewBaseMessageNotification(&notification), nil
-	} else {
-		//println("unmarshaled notification error:", err.Error())
+	} else if rb.logger != nil {
+		rb.logger.Printf("DEBUG: Failed to unmarshal as notification: %v", err)
 	}
 
 	var response transport.BaseJSONRPCResponse
 	if err := json.Unmarshal([]byte(line), &response); err == nil {
 		return transport.NewBaseMessageResponse(&response), nil
-	} else {
-		//println("unmarshaled response error:", err.Error())
+	} else if rb.logger != nil {
+		rb.logger.Printf("DEBUG: Failed to unmarshal as response: %v", err)
 	}
 
 	var errorResponse transport.BaseJSONRPCError
 	if err := json.Unmarshal([]byte(line), &errorResponse); err == nil {
 		return transport.NewBaseMessageError(&errorResponse), nil
-	} else {
-		//println("unmarshaled error response error:", err.Error())
+	} else if rb.logger != nil {
+		rb.logger.Printf("DEBUG: Failed to unmarshal as error response: %v", err)
 	}
 
 	// Must be a response

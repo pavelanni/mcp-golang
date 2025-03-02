@@ -1,8 +1,9 @@
 package stdio
 
 import (
-	"github.com/metoro-io/mcp-golang/transport"
 	"testing"
+
+	"github.com/metoro-io/mcp-golang/transport"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -86,7 +87,7 @@ func TestMessageDeserialization(t *testing.T) {
 		},
 		{
 			name:     "error",
-			input:    `{"jsonrpc": "2.0", "error": {"code": -32600, "message": "Invalid Request"}, "id": 1}`,
+			input:    `{"jsonrpc": "2.0", "error": {"code": -32700, "message": "Parse error"}, "id": 1}`,
 			wantType: transport.BaseMessageTypeJSONRPCErrorType,
 		},
 		{
@@ -98,7 +99,8 @@ func TestMessageDeserialization(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			msg, err := deserializeMessage(tt.input)
+			rb := NewReadBuffer()
+			msg, err := rb.deserializeMessage(tt.input)
 			if err != nil {
 				t.Errorf("deserializeMessage failed: %v", err)
 			}
@@ -112,16 +114,21 @@ func TestMessageDeserialization(t *testing.T) {
 	}
 
 	t.Run("request", func(t *testing.T) {
-		msg, err := deserializeMessage(`{"jsonrpc":"2.0","id":1,"method":"test","params":{}}`)
+		rb := NewReadBuffer()
+		msg, err := rb.deserializeMessage(`{"jsonrpc":"2.0","id":1,"method":"test","params":{}}`)
 		assert.NoError(t, err)
 		assert.Equal(t, transport.BaseMessageTypeJSONRPCRequestType, msg.Type)
 		assert.Equal(t, "2.0", msg.JsonRpcRequest.Jsonrpc)
 		assert.Equal(t, "test", msg.JsonRpcRequest.Method)
-		assert.Equal(t, transport.RequestId(1), msg.JsonRpcRequest.Id)
+
+		// Check that the ID is correctly parsed as a number
+		assert.False(t, msg.JsonRpcRequest.Id.IsString)
+		assert.Equal(t, int64(1), msg.JsonRpcRequest.Id.NumberValue)
 	})
 
 	t.Run("notification", func(t *testing.T) {
-		msg, err := deserializeMessage(`{"jsonrpc":"2.0","method":"test","params":{}}`)
+		rb := NewReadBuffer()
+		msg, err := rb.deserializeMessage(`{"jsonrpc":"2.0","method":"test","params":{}}`)
 		assert.NoError(t, err)
 		assert.Equal(t, transport.BaseMessageTypeJSONRPCNotificationType, msg.Type)
 		assert.Equal(t, "2.0", msg.JsonRpcNotification.Jsonrpc)
@@ -129,11 +136,28 @@ func TestMessageDeserialization(t *testing.T) {
 	})
 
 	t.Run("error", func(t *testing.T) {
-		msg, err := deserializeMessage(`{"jsonrpc":"2.0","id":1,"error":{"code":-32700,"message":"Parse error"}}`)
+		rb := NewReadBuffer()
+		msg, err := rb.deserializeMessage(`{"jsonrpc":"2.0","id":1,"error":{"code":-32700,"message":"Parse error"}}`)
 		assert.NoError(t, err)
 		assert.Equal(t, transport.BaseMessageTypeJSONRPCErrorType, msg.Type)
 		assert.Equal(t, "2.0", msg.JsonRpcError.Jsonrpc)
 		assert.Equal(t, -32700, msg.JsonRpcError.Error.Code)
 		assert.Equal(t, "Parse error", msg.JsonRpcError.Error.Message)
+
+		// Check that the ID is correctly parsed as a number
+		assert.False(t, msg.JsonRpcError.Id.IsString)
+		assert.Equal(t, int64(1), msg.JsonRpcError.Id.NumberValue)
+	})
+
+	// Add a test for string IDs
+	t.Run("string_id", func(t *testing.T) {
+		rb := NewReadBuffer()
+		msg, err := rb.deserializeMessage(`{"jsonrpc":"2.0","id":"init-1","method":"test","params":{}}`)
+		assert.NoError(t, err)
+		assert.Equal(t, transport.BaseMessageTypeJSONRPCRequestType, msg.Type)
+
+		// Check that the ID is correctly parsed as a string
+		assert.True(t, msg.JsonRpcRequest.Id.IsString)
+		assert.Equal(t, "init-1", msg.JsonRpcRequest.Id.StringValue)
 	})
 }

@@ -16,21 +16,21 @@ type baseTransport struct {
 	errorHandler   func(error)
 	closeHandler   func()
 	mu             sync.RWMutex
-	responseMap    map[int64]chan *transport.BaseJsonRpcMessage
+	responseMap    map[string]chan *transport.BaseJsonRpcMessage
 }
 
 func newBaseTransport() *baseTransport {
 	return &baseTransport{
-		responseMap: make(map[int64]chan *transport.BaseJsonRpcMessage),
+		responseMap: make(map[string]chan *transport.BaseJsonRpcMessage),
 	}
 }
 
 // Send implements Transport.Send
 func (t *baseTransport) Send(ctx context.Context, message *transport.BaseJsonRpcMessage) error {
-	key := message.JsonRpcResponse.Id
-	responseChannel := t.responseMap[int64(key)]
+	key := message.JsonRpcResponse.Id.String()
+	responseChannel := t.responseMap[key]
 	if responseChannel == nil {
-		return fmt.Errorf("no response channel found for key: %d", key)
+		return fmt.Errorf("no response channel found for key: %s", key)
 	}
 	responseChannel <- message
 	return nil
@@ -69,15 +69,19 @@ func (t *baseTransport) SetMessageHandler(handler func(ctx context.Context, mess
 func (t *baseTransport) handleMessage(ctx context.Context, body []byte) (*transport.BaseJsonRpcMessage, error) {
 	// Store the response writer for later use
 	t.mu.Lock()
-	var key int64 = 0
+	var keyStr string = "0"
 
-	for key < 1000000 {
-		if _, ok := t.responseMap[key]; !ok {
+	for {
+		if _, ok := t.responseMap[keyStr]; !ok {
 			break
 		}
-		key = key + 1
+		// Increment the key as a string
+		keyInt := 0
+		fmt.Sscanf(keyStr, "%d", &keyInt)
+		keyInt++
+		keyStr = fmt.Sprintf("%d", keyInt)
 	}
-	t.responseMap[key] = make(chan *transport.BaseJsonRpcMessage)
+	t.responseMap[keyStr] = make(chan *transport.BaseJsonRpcMessage)
 	t.mu.Unlock()
 
 	var prevId *transport.RequestId = nil
@@ -88,7 +92,10 @@ func (t *baseTransport) handleMessage(ctx context.Context, body []byte) (*transp
 		deserialized = true
 		id := request.Id
 		prevId = &id
-		request.Id = transport.RequestId(key)
+		request.Id = transport.RequestId{
+			StringValue: keyStr,
+			IsString:    true,
+		}
 		t.mu.RLock()
 		handler := t.messageHandler
 		t.mu.RUnlock()
@@ -144,8 +151,8 @@ func (t *baseTransport) handleMessage(ctx context.Context, body []byte) (*transp
 	}
 
 	// Block until the response is received
-	responseToUse := <-t.responseMap[key]
-	delete(t.responseMap, key)
+	responseToUse := <-t.responseMap[keyStr]
+	delete(t.responseMap, keyStr)
 	if prevId != nil {
 		responseToUse.JsonRpcResponse.Id = *prevId
 	}

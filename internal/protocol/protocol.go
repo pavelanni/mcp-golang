@@ -116,8 +116,8 @@ type Protocol struct {
 	transport transport.Transport
 	options   *ProtocolOptions
 
-	requestMessageID transport.RequestId
-	mu               sync.RWMutex
+	requestMessageCounter int64
+	mu                    sync.RWMutex
 
 	// Maps method name to request handler
 	requestHandlers map[string]func(context.Context, *transport.BaseJSONRPCRequest, RequestHandlerExtra) (transport.JsonRpcBody, error) // Result or error
@@ -151,7 +151,7 @@ func NewProtocol(options *ProtocolOptions) *Protocol {
 		options:              options,
 		requestHandlers:      make(map[string]func(context.Context, *transport.BaseJSONRPCRequest, RequestHandlerExtra) (transport.JsonRpcBody, error)),
 		requestCancellers:    make(map[transport.RequestId]context.CancelFunc),
-		notificationHandlers: make(map[string]func(*transport.BaseJSONRPCNotification) error),
+		notificationHandlers: make(map[string]func(notification *transport.BaseJSONRPCNotification) error),
 		responseHandlers:     make(map[transport.RequestId]chan *responseEnvelope),
 		progressHandlers:     make(map[transport.RequestId]ProgressCallback),
 	}
@@ -395,8 +395,12 @@ func (p *Protocol) Request(ctx context.Context, method string, params interface{
 	}
 
 	p.mu.Lock()
-	id := p.requestMessageID
-	p.requestMessageID++
+	counter := p.requestMessageCounter
+	p.requestMessageCounter++
+	id := transport.RequestId{
+		StringValue: fmt.Sprintf("%d", counter),
+		IsString:    true,
+	}
 	ch := make(chan *responseEnvelope, 1)
 	p.responseHandlers[id] = ch
 	if opts.OnProgress != nil {
@@ -434,6 +438,13 @@ func (p *Protocol) Request(ctx context.Context, method string, params interface{
 		return nil, fmt.Errorf("failed to marshal params: %w", err)
 	}
 
+	// Create a context with timeout
+	ctx, cancel := context.WithTimeout(opts.Context, opts.Timeout)
+	p.mu.Lock()
+	p.requestCancellers[id] = cancel
+	p.mu.Unlock()
+
+	// Send the request
 	request := &transport.BaseJSONRPCRequest{
 		Jsonrpc: "2.0",
 		Method:  method,

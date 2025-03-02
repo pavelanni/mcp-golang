@@ -29,10 +29,10 @@ func (t *GinTransport) Start(ctx context.Context) error {
 
 // Send implements Transport.Send
 func (t *GinTransport) Send(ctx context.Context, message *transport.BaseJsonRpcMessage) error {
-	key := message.JsonRpcResponse.Id
-	responseChannel := t.responseMap[int64(key)]
+	key := message.JsonRpcResponse.Id.String()
+	responseChannel := t.responseMap[key]
 	if responseChannel == nil {
-		return fmt.Errorf("no response channel found for key: %d", key)
+		return fmt.Errorf("no response channel found for key: %s", key)
 	}
 	responseChannel <- message
 	return nil

@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
+	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"github.com/metoro-io/mcp-golang/internal/datastructures"
 	"github.com/metoro-io/mcp-golang/internal/protocol"
 	"github.com/metoro-io/mcp-golang/transport"
+	"github.com/metoro-io/mcp-golang/transport/stdio"
 	"github.com/pkg/errors"
 )
 
@@ -110,6 +113,8 @@ type Server struct {
 	serverInstructions *string
 	serverName         string
 	serverVersion      string
+	logger             *log.Logger
+	logFile            *os.File
 }
 
 type prompt struct {
@@ -161,6 +166,19 @@ func WithVersion(version string) ServerOptions {
 	}
 }
 
+func WithLogFile(logFilePath string) ServerOptions {
+	return func(s *Server) {
+		// Open log file
+		f, err := os.OpenFile(logFilePath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+		if err != nil {
+			// If we can't open the log file, we'll just log to a null device
+			f, _ = os.Open(os.DevNull)
+		}
+		s.logFile = f
+		s.logger = log.New(f, "MCP-SERVER: ", log.Ldate|log.Ltime|log.Lshortfile)
+	}
+}
+
 func NewServer(transport transport.Transport, options ...ServerOptions) *Server {
 	server := &Server{
 		protocol:  protocol.NewProtocol(nil),
@@ -172,6 +190,14 @@ func NewServer(transport transport.Transport, options ...ServerOptions) *Server 
 	for _, option := range options {
 		option(server)
 	}
+
+	// If no logger was set, create a default one that writes to /dev/null
+	if server.logger == nil {
+		f, _ := os.Open(os.DevNull)
+		server.logFile = f
+		server.logger = log.New(f, "MCP-SERVER: ", log.Ldate|log.Ltime|log.Lshortfile)
+	}
+
 	return server
 }
 
@@ -541,30 +567,169 @@ func createWrappedToolHandler(userHandler any) func(context.Context, baseCallToo
 	}
 }
 
+// wrapWithLogging wraps a request handler with logging
+func (s *Server) wrapWithLogging(method string, handler func(context.Context, *transport.BaseJSONRPCRequest, protocol.RequestHandlerExtra) (transport.JsonRpcBody, error)) func(context.Context, *transport.BaseJSONRPCRequest, protocol.RequestHandlerExtra) (transport.JsonRpcBody, error) {
+	return func(ctx context.Context, request *transport.BaseJSONRPCRequest, extra protocol.RequestHandlerExtra) (transport.JsonRpcBody, error) {
+		s.logger.Printf("Received request for method: %s with ID: %v", method, request.Id)
+		s.logger.Printf("Request params: %s", string(request.Params))
+
+		result, err := handler(ctx, request, extra)
+
+		if err != nil {
+			s.logger.Printf("Error handling request for method %s: %v", method, err)
+		} else {
+			s.logger.Printf("Successfully handled request for method: %s", method)
+		}
+
+		return result, err
+	}
+}
+
+// loggingTransport wraps a transport with logging
+type loggingTransport struct {
+	transport transport.Transport
+	logger    *log.Logger
+}
+
+func newLoggingTransport(t transport.Transport, logger *log.Logger) *loggingTransport {
+	return &loggingTransport{
+		transport: t,
+		logger:    logger,
+	}
+}
+
+func (lt *loggingTransport) Start(ctx context.Context) error {
+	lt.logger.Println("Transport starting")
+	return lt.transport.Start(ctx)
+}
+
+func (lt *loggingTransport) Send(ctx context.Context, message *transport.BaseJsonRpcMessage) error {
+	lt.logger.Printf("Sending message: %+v", message)
+	return lt.transport.Send(ctx, message)
+}
+
+func (lt *loggingTransport) Close() error {
+	lt.logger.Println("Transport closing")
+	return lt.transport.Close()
+}
+
+func (lt *loggingTransport) SetCloseHandler(handler func()) {
+	lt.logger.Println("Setting close handler")
+	lt.transport.SetCloseHandler(func() {
+		lt.logger.Println("Transport closed")
+		handler()
+	})
+}
+
+func (lt *loggingTransport) SetMessageHandler(handler func(ctx context.Context, message *transport.BaseJsonRpcMessage)) {
+	lt.logger.Println("Setting message handler")
+	lt.transport.SetMessageHandler(func(ctx context.Context, message *transport.BaseJsonRpcMessage) {
+		// Log the raw message content if available
+		if message != nil {
+			if message.JsonRpcRequest != nil {
+				lt.logger.Printf("Received JSON-RPC request: Method=%s, ID=%v, Params=%s",
+					message.JsonRpcRequest.Method,
+					message.JsonRpcRequest.Id,
+					string(message.JsonRpcRequest.Params))
+			} else if message.JsonRpcResponse != nil {
+				lt.logger.Printf("Received JSON-RPC response: ID=%v, Result=%s",
+					message.JsonRpcResponse.Id,
+					string(message.JsonRpcResponse.Result))
+			} else if message.JsonRpcNotification != nil {
+				lt.logger.Printf("Received JSON-RPC notification: Method=%s, Params=%s",
+					message.JsonRpcNotification.Method,
+					string(message.JsonRpcNotification.Params))
+			} else {
+				lt.logger.Printf("Received unknown message type: %T", message)
+			}
+		} else {
+			lt.logger.Printf("Received nil message")
+		}
+
+		lt.logger.Printf("Raw message: %+v", message)
+		handler(ctx, message)
+	})
+}
+
+func (lt *loggingTransport) SetErrorHandler(handler func(error)) {
+	lt.logger.Println("Setting error handler")
+	lt.transport.SetErrorHandler(func(err error) {
+		lt.logger.Printf("Transport error: %v", err)
+		// Try to get more detailed error information
+		if unwrapped := errors.Unwrap(err); unwrapped != nil {
+			lt.logger.Printf("Unwrapped error: %v", unwrapped)
+		}
+		handler(err)
+	})
+}
+
 func (s *Server) Serve() error {
 	if s.isRunning {
 		return fmt.Errorf("server is already running")
 	}
+
+	s.logger.Println("Starting MCP server")
+
+	// Log the transport type
+	s.logger.Printf("Using transport type: %T", s.transport)
+
+	// Set logger on StdioServerTransport if applicable
+	if stdioTransport, ok := s.transport.(*stdio.StdioServerTransport); ok {
+		s.logger.Println("Setting logger on StdioServerTransport")
+		stdioTransport.SetLogger(s.logger)
+	}
+
+	// Wrap the transport with logging
+	loggingTransport := newLoggingTransport(s.transport, s.logger)
+	s.transport = loggingTransport
+
 	pr := s.protocol
-	pr.SetRequestHandler("ping", s.handlePing)
-	pr.SetRequestHandler("initialize", s.handleInitialize)
-	pr.SetRequestHandler("tools/list", s.handleListTools)
-	pr.SetRequestHandler("tools/call", s.handleToolCalls)
-	pr.SetRequestHandler("prompts/list", s.handleListPrompts)
-	pr.SetRequestHandler("prompts/get", s.handlePromptCalls)
-	pr.SetRequestHandler("resources/list", s.handleListResources)
-	pr.SetRequestHandler("resources/read", s.handleResourceCalls)
+
+	s.logger.Println("Registering 'ping' request handler")
+	pr.SetRequestHandler("ping", s.wrapWithLogging("ping", s.handlePing))
+
+	s.logger.Println("Registering 'initialize' request handler")
+	pr.SetRequestHandler("initialize", s.wrapWithLogging("initialize", s.handleInitialize))
+
+	s.logger.Println("Registering 'tools/list' request handler")
+	pr.SetRequestHandler("tools/list", s.wrapWithLogging("tools/list", s.handleListTools))
+
+	s.logger.Println("Registering 'tools/call' request handler")
+	pr.SetRequestHandler("tools/call", s.wrapWithLogging("tools/call", s.handleToolCalls))
+
+	s.logger.Println("Registering 'prompts/list' request handler")
+	pr.SetRequestHandler("prompts/list", s.wrapWithLogging("prompts/list", s.handleListPrompts))
+
+	s.logger.Println("Registering 'prompts/get' request handler")
+	pr.SetRequestHandler("prompts/get", s.wrapWithLogging("prompts/get", s.handlePromptCalls))
+
+	s.logger.Println("Registering 'resources/list' request handler")
+	pr.SetRequestHandler("resources/list", s.wrapWithLogging("resources/list", s.handleListResources))
+
+	s.logger.Println("Registering 'resources/read' request handler")
+	pr.SetRequestHandler("resources/read", s.wrapWithLogging("resources/read", s.handleResourceCalls))
+
+	s.logger.Println("Registered all request handlers")
+
+	s.logger.Println("Connecting to transport")
 	err := pr.Connect(s.transport)
 	if err != nil {
+		s.logger.Printf("Failed to connect to transport: %v", err)
 		return err
 	}
+	s.logger.Println("Connected to transport")
+
 	s.protocol = pr
 	s.isRunning = true
+	s.logger.Println("Server is now running")
 	return nil
 }
 
 func (s *Server) handleInitialize(ctx context.Context, request *transport.BaseJSONRPCRequest, _ protocol.RequestHandlerExtra) (transport.JsonRpcBody, error) {
-	return InitializeResponse{
+	s.logger.Println("Handling initialize request")
+	s.logger.Printf("Initialize request params: %s", string(request.Params))
+
+	response := InitializeResponse{
 		Meta:            nil,
 		Capabilities:    s.generateCapabilities(),
 		Instructions:    s.serverInstructions,
@@ -573,7 +738,10 @@ func (s *Server) handleInitialize(ctx context.Context, request *transport.BaseJS
 			Name:    s.serverName,
 			Version: s.serverVersion,
 		},
-	}, nil
+	}
+
+	s.logger.Printf("Responding to initialize with server info: %s v%s", s.serverName, s.serverVersion)
+	return response, nil
 }
 
 func (s *Server) handleListTools(ctx context.Context, request *transport.BaseJSONRPCRequest, _ protocol.RequestHandlerExtra) (transport.JsonRpcBody, error) {
@@ -673,6 +841,7 @@ func (s *Server) handleToolCalls(ctx context.Context, req *transport.BaseJSONRPC
 	}
 	return toolToUse.Handler(ctx, params), nil
 }
+
 func (s *Server) generateCapabilities() ServerCapabilities {
 	t := false
 	return ServerCapabilities{
@@ -693,6 +862,7 @@ func (s *Server) generateCapabilities() ServerCapabilities {
 		}(),
 	}
 }
+
 func (s *Server) handleListPrompts(ctx context.Context, request *transport.BaseJSONRPCRequest, extra protocol.RequestHandlerExtra) (transport.JsonRpcBody, error) {
 	type promptRequestParams struct {
 		Cursor *string `json:"cursor"`
@@ -877,6 +1047,14 @@ func (s *Server) handleResourceCalls(ctx context.Context, req *transport.BaseJSO
 
 func (s *Server) handlePing(ctx context.Context, request *transport.BaseJSONRPCRequest, extra protocol.RequestHandlerExtra) (transport.JsonRpcBody, error) {
 	return map[string]interface{}{}, nil
+}
+
+// Close closes any resources used by the server, including the log file
+func (s *Server) Close() error {
+	if s.logFile != nil {
+		return s.logFile.Close()
+	}
+	return nil
 }
 
 func validateToolHandler(handler any) error {

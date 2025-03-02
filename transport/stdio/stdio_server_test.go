@@ -54,9 +54,11 @@ func TestStdioServerTransport(t *testing.T) {
 		// Verify received message
 		req, ok := receivedMsg.(*transport.BaseJsonRpcMessage)
 		assert.True(t, ok)
-		assert.True(t, req.Type == transport.BaseMessageTypeJSONRPCRequestType)
+		assert.Equal(t, transport.BaseMessageTypeJSONRPCRequestType, req.Type)
 		assert.Equal(t, "test", req.JsonRpcRequest.Method)
-		assert.Equal(t, transport.RequestId(1), req.JsonRpcRequest.Id)
+		assert.Equal(t, "2.0", req.JsonRpcRequest.Jsonrpc)
+		assert.False(t, req.JsonRpcRequest.Id.IsString)
+		assert.Equal(t, int64(1), req.JsonRpcRequest.Id.NumberValue)
 
 		err = tr.Close()
 		assert.NoError(t, err)
@@ -86,14 +88,17 @@ func TestStdioServerTransport(t *testing.T) {
 		msg := &transport.BaseJSONRPCResponse{
 			Jsonrpc: "2.0",
 			Result:  result,
-			Id:      1,
+			Id: transport.RequestId{
+				StringValue: "1",
+				IsString:    true,
+			},
 		}
 
 		err := tr.Send(context.Background(), transport.NewBaseMessageResponse(msg))
 		assert.NoError(t, err)
 
 		// Verify output contains the message and newline
-		assert.Contains(t, out.String(), `{"id":1,"jsonrpc":"2.0","result":{"status":"ok"}}`)
+		assert.Contains(t, out.String(), `{"id":"1","jsonrpc":"2.0","result":{"status":"ok"}}`)
 		assert.Contains(t, out.String(), "\n")
 	})
 
