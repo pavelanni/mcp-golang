@@ -142,7 +142,10 @@ func TestServerIntegration(t *testing.T) {
 			Jsonrpc: "2.0",
 			Method:  method,
 			Params:  json.RawMessage(paramsBytes),
-			Id:      transport.RequestId(i),
+			Id: transport.RequestId{
+				StringValue: fmt.Sprintf("%d", i),
+				IsString:    true,
+			},
 		}
 		i++
 
@@ -193,7 +196,7 @@ func TestServerIntegration(t *testing.T) {
 		"capabilities": map[string]interface{}{},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, float64(1), resp["id"])
+	assert.Equal(t, "1", resp["id"])
 	assert.NotNil(t, resp["result"])
 
 	time.Sleep(100 * time.Millisecond)

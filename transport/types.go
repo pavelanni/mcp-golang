@@ -3,11 +3,55 @@ package transport
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strconv"
 )
 
 type JSONRPCMessage interface{}
 
-type RequestId int64
+// RequestId represents a JSON-RPC request ID which can be either a string or a number
+type RequestId struct {
+	StringValue string
+	NumberValue int64
+	IsString    bool
+}
+
+// UnmarshalJSON implements custom unmarshaling for RequestId to handle both string and numeric IDs
+func (r *RequestId) UnmarshalJSON(data []byte) error {
+	// Try to unmarshal as string first
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		r.StringValue = s
+		r.IsString = true
+		return nil
+	}
+
+	// If that fails, try to unmarshal as number
+	var n int64
+	if err := json.Unmarshal(data, &n); err == nil {
+		r.NumberValue = n
+		r.IsString = false
+		return nil
+	}
+
+	return fmt.Errorf("ID must be a string or a number")
+}
+
+// MarshalJSON implements custom marshaling for RequestId
+func (r RequestId) MarshalJSON() ([]byte, error) {
+	if r.IsString {
+		return json.Marshal(r.StringValue)
+	}
+	return json.Marshal(r.NumberValue)
+}
+
+// String returns a string representation of the ID
+func (r RequestId) String() string {
+	if r.IsString {
+		return r.StringValue
+	}
+	return strconv.FormatInt(r.NumberValue, 10)
+}
 
 type BaseJSONRPCErrorInner struct {
 	// The error type that occurred.

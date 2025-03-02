@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"sync"
 
@@ -23,6 +24,7 @@ type StdioServerTransport struct {
 	onClose   func()
 	onError   func(error)
 	onMessage func(ctx context.Context, message *transport.BaseJsonRpcMessage)
+	logger    *log.Logger
 }
 
 // NewStdioServerTransport creates a new StdioServerTransport using os.Stdin and os.Stdout
@@ -39,6 +41,14 @@ func NewStdioServerTransportWithIO(in io.Reader, out io.Writer) *StdioServerTran
 	}
 }
 
+// SetLogger sets the logger for the transport and its ReadBuffer
+func (t *StdioServerTransport) SetLogger(logger *log.Logger) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.logger = logger
+	t.readBuf.SetLogger(logger)
+}
+
 // Start begins listening for messages on stdin
 func (t *StdioServerTransport) Start(ctx context.Context) error {
 	t.mu.Lock()
@@ -48,6 +58,10 @@ func (t *StdioServerTransport) Start(ctx context.Context) error {
 	}
 	t.started = true
 	t.mu.Unlock()
+
+	if t.logger != nil {
+		t.logger.Println("StdioServerTransport started")
+	}
 
 	go t.readLoop(ctx)
 	return nil
@@ -63,6 +77,11 @@ func (t *StdioServerTransport) Close() error {
 	if t.onClose != nil {
 		t.onClose()
 	}
+
+	if t.logger != nil {
+		t.logger.Println("StdioServerTransport closed")
+	}
+
 	return nil
 }
 
@@ -75,6 +94,9 @@ func (t *StdioServerTransport) Send(ctx context.Context, message *transport.Base
 	data = append(data, '\n')
 
 	//println("serialized message:", string(data))
+	if t.logger != nil {
+		t.logger.Printf("Sending message: %s", string(data))
+	}
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -127,6 +149,10 @@ func (t *StdioServerTransport) readLoop(ctx context.Context) {
 				return
 			}
 
+			if t.logger != nil {
+				t.logger.Printf("Read %d bytes from stdin", n)
+			}
+
 			t.readBuf.Append(buffer[:n])
 			t.processReadBuffer()
 		}
@@ -138,6 +164,9 @@ func (t *StdioServerTransport) processReadBuffer() {
 		msg, err := t.readBuf.ReadMessage()
 		if err != nil {
 			//println("error reading message:", err.Error())
+			if t.logger != nil {
+				t.logger.Printf("Error reading message: %v", err)
+			}
 			t.handleError(err)
 			return
 		}
@@ -146,11 +175,18 @@ func (t *StdioServerTransport) processReadBuffer() {
 			return
 		}
 		//println("received message:", spew.Sprint(msg))
+		if t.logger != nil && msg != nil {
+			t.logger.Printf("Received message: %+v", msg)
+		}
 		t.handleMessage(msg)
 	}
 }
 
 func (t *StdioServerTransport) handleError(err error) {
+	if t.logger != nil {
+		t.logger.Printf("Transport error: %v", err)
+	}
+
 	t.mu.Lock()
 	handler := t.onError
 	t.mu.Unlock()

@@ -2,6 +2,9 @@ package mcp_golang
 
 import (
 	"context"
+	"io"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/metoro-io/mcp-golang/internal/protocol"
@@ -570,5 +573,48 @@ func TestHandleListResourcesPagination(t *testing.T) {
 	}
 	if resourcesResp.NextCursor != nil {
 		t.Error("Expected no next cursor when pagination is disabled")
+	}
+}
+
+func TestServerLogging(t *testing.T) {
+	// Create a temporary log file
+	tmpFile, err := os.CreateTemp("", "mcp-server-test-*.log")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	defer tmpFile.Close()
+
+	// Create a server with logging enabled
+	mockTransport := testingutils.NewMockTransport()
+	server := NewServer(mockTransport, WithLogFile(tmpFile.Name()))
+
+	// Serve the server
+	err = server.Serve()
+	if err != nil {
+		t.Fatalf("Failed to serve: %v", err)
+	}
+	defer server.Close()
+
+	// Read the log file
+	tmpFile.Seek(0, 0)
+	logContent, err := io.ReadAll(tmpFile)
+	if err != nil {
+		t.Fatalf("Failed to read log file: %v", err)
+	}
+
+	// Check that the log contains expected messages
+	logStr := string(logContent)
+	expectedMessages := []string{
+		"Starting MCP server",
+		"Registered all request handlers",
+		"Connected to transport",
+		"Server is now running",
+	}
+
+	for _, msg := range expectedMessages {
+		if !strings.Contains(logStr, msg) {
+			t.Errorf("Log does not contain expected message: %s", msg)
+		}
 	}
 }
